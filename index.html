@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ISS Tracker (Leaflet)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-sA+e2k5fM2v6Zr1h7r8i6k0y4k1q5Yw5xk5x5uG6k2k="
+    crossorigin=""
+  />
+
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    #map { display: block; }
+    .iss-info {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      background: rgba(255,255,255,0.9);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      font-size: 14px;
+    }
+    .iss-info b { display:block; margin-bottom:4px; }
+    .controls {
+      display:flex;
+      gap:8px;
+      margin-top:6px;
+    }
+    button { font-size: 13px; padding:6px 8px; }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="iss-info" id="info">
+  <b>ISS Tracker</b>
+  <div id="coords">Lat: — , Lon: —</div>
+  <div id="time">Time: —</div>
+  <div class="controls">
+    <button id="toggleTrail">Hide trail</button>
+    <button id="resetTrail">Reset trail</button>
+  </div>
+</div>
+
+<!-- Leaflet JS -->
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-o9N1j8o3f1m0fC9Q2x0E3n8zQ6gk7k2b3u0Yb8Q+7yI="
+  crossorigin=""
+></script>
+
+<script>
+/*
+  ISS tracker using Leaflet and open-notify ISS position API.
+  - Fetches http://api.open-notify.org/iss-now.json every 5 seconds
+  - Places a marker at returned lat/lon
+  - Maintains a polyline trail of previous positions (toggle/clearable)
+*/
+
+const API_URL = 'http://api.open-notify.org/iss-now.json';
+const POLL_INTERVAL_MS = 5000;
+const MAX_TRAIL_POINTS = 1000; // keep trail length bounded
+
+// Initialize map: global view
+const map = L.map('map', { zoomControl: true }).setView([0, 0], 2);
+
+// OpenStreetMap tiles
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+// ISS marker: use a circle marker for simplicity (easy to style)
+const issMarker = L.circleMarker([0,0], {
+  radius: 8,
+  color: '#ff5722',
+  fillColor: '#ff8a50',
+  fillOpacity: 1,
+  weight: 2
+}).addTo(map);
+
+// Optional popup
+issMarker.bindPopup('International Space Station');
+
+// Trail polyline
+let trailVisible = true;
+let trailLatLngs = [];
+const trail = L.polyline(trailLatLngs, { color: '#2196f3', weight: 2, opacity: 0.8 }).addTo(map);
+
+// UI elements
+const coordsEl = document.getElementById('coords');
+const timeEl = document.getElementById('time');
+const toggleTrailBtn = document.getElementById('toggleTrail');
+const resetTrailBtn = document.getElementById('resetTrail');
+
+toggleTrailBtn.addEventListener('click', () => {
+  trailVisible = !trailVisible;
+  if (trailVisible) {
+    trail.addTo(map);
+    toggleTrailBtn.textContent = 'Hide trail';
+  } else {
+    map.removeLayer(trail);
+    toggleTrailBtn.textContent = 'Show trail';
+  }
+});
+
+resetTrailBtn.addEventListener('click', () => {
+  trailLatLngs = [];
+  trail.setLatLngs(trailLatLngs);
+});
+
+// Convert API response coords to numbers and returns [lat, lon]
+function parseIssPosition(data) {
+  const lat = parseFloat(data.iss_position.latitude);
+  const lon = parseFloat(data.iss_position.longitude);
+  return [lat, lon];
+}
+
+let firstFix = true;
+async function fetchAndUpdateISS() {
+  try {
+    const res = await fetch(API_URL);
+    if (!res.ok) throw new Error('Network response not ok: ' + res.status);
+    const data = await res.json();
+    if (data.message !== 'success') throw new Error('API returned unsuccessful message');
+
+    const [lat, lon] = parseIssPosition(data);
+    const ts = new Date(data.timestamp * 1000);
+
+    // Update UI text
+    coordsEl.textContent = `Lat: ${lat.toFixed(5)} , Lon: ${lon.toFixed(5)}`;
+    timeEl.textContent = `Time: ${ts.toUTCString()}`;
+
+    // Update marker
+    issMarker.setLatLng([lat, lon]);
+
+    // Optionally open popup on first fix
+    if (firstFix) {
+      issMarker.openPopup();
+      firstFix = false;
+    }
+
+    // Add to trail
+    trailLatLngs.push([lat, lon]);
+    // Keep trail bounded
+    if (trailLatLngs.length > MAX_TRAIL_POINTS) {
+      trailLatLngs = trailLatLngs.slice(trailLatLngs.length - MAX_TRAIL_POINTS);
+    }
+    trail.setLatLngs(trailLatLngs);
+
+    // Optionally, center map around ISS on first update
+    if (trailLatLngs.length === 1) {
+      // keep global view but zoom slightly closer for first fix
+      map.setView([lat, lon], 3);
+    }
+
+  } catch (err) {
+    console.error('Failed to fetch ISS position:', err);
+    timeEl.textContent = 'Time: Error fetching data';
+  }
+}
+
+// Initial fetch + periodic updates
+fetchAndUpdateISS();
+const intervalId = setInterval(fetchAndUpdateISS, POLL_INTERVAL_MS);
+
+// Cleanup when leaving (not strictly necessary for a simple page)
+window.addEventListener('beforeunload', () => {
+  clearInterval(intervalId);
+});
+</script>
+
+</body>
+</html>
